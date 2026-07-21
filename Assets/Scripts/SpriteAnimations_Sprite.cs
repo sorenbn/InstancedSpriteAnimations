@@ -1,12 +1,11 @@
 using UnityEngine;
 
-public class SpriteAnimations_Mesh : MonoBehaviour
+public class SpriteAnimations_Sprite : MonoBehaviour
 {
     public const int MAX_ENTITIES = 500;
 
-    public Mesh mesh_quad;
     public Material sprite_material;
-    public Texture2D sprite_sheet;
+    public int current_animation_index = 0;
     public EntityAnimationDefinition[] animations;
 
     // Graphics.RenderMeshInstanced caps at 1023 per call.
@@ -14,11 +13,11 @@ public class SpriteAnimations_Mesh : MonoBehaviour
     // custom per-instance tiling and offset data, to scroll through texture animation
     private Vector4[] uv_frame_buffer = new Vector4[1023];
     // custom per-instance size and pivot info (xy = ppu-based size, zw: sprite pivot)
-    private Vector4[] quad_data_buffer = new Vector4[1023];
+    private Vector4[] remapped_uv_buffer = new Vector4[1023];
 
     private MaterialPropertyBlock material_property_block;
     private int SHADER_PROP_UV_FRAME = Shader.PropertyToID("_UVFrame");
-    private int SHADER_PROP_QUAD_DATA = Shader.PropertyToID("_QuadData");
+    private int SHADER_PROP_UVREMAP_DATA = Shader.PropertyToID("_UVRemap");
     private int SHADER_PROP_MAIN_TEX = Shader.PropertyToID("_MainTex");
 
     private Entity[] entities = new Entity[MAX_ENTITIES];
@@ -35,7 +34,7 @@ public class SpriteAnimations_Mesh : MonoBehaviour
 
             for (int j = 0; j < animation.animation_frames.Length; j++)
             {
-                animation.frame_data[j] = SpriteAnimaionFrameData.create_from_sprite(animation.animation_frames[j], use_mesh_instancing: true);
+                animation.frame_data[j] = SpriteAnimaionFrameData.create_from_sprite(animation.animation_frames[j], use_mesh_instancing: false);
             }
         }
 
@@ -49,7 +48,11 @@ public class SpriteAnimations_Mesh : MonoBehaviour
             entity.scale = Vector2.one;
             entity.rotation = 0.0f;
 
-            set_entity_animation(ref entity, (EntityAnimationType)Random.Range(0, 5), Random.value);
+            // works, but the offsets are wrong
+            //set_entity_animation(ref entity, EntityAnimationType.SAMURAI_RUN, 0.0f);
+
+            // does not work
+            set_entity_animation(ref entity, (EntityAnimationType)Random.Range(0, 5), 0.0f);
         }
     }
 
@@ -89,36 +92,43 @@ public class SpriteAnimations_Mesh : MonoBehaviour
 
             var animation = animations[entity.current_animation_index];
             var frame_data = animation.frame_data[entity.current_animation_frame_index];
+            var uv_remap = animation.frame_data[0].uv_remap;
 
             matrix_buffer[draw_count] = Matrix4x4.TRS(
                 new Vector3(entity.position.x, entity.position.y, 0.0f),
                 Quaternion.Euler(0.0f, 0.0f, entity.rotation),
                 entity.scale);
 
-            uv_frame_buffer[draw_count] = new Vector4(frame_data.size_uv.x, frame_data.size_uv.y, frame_data.offset.x, frame_data.offset.y);
-            quad_data_buffer[draw_count] = new Vector4(frame_data.size_rect.x, frame_data.size_rect.y, frame_data.pivot.x, frame_data.pivot.y);
+            remapped_uv_buffer[draw_count] = new Vector4(uv_remap.x, uv_remap.y, uv_remap.z, uv_remap.w);
+            uv_frame_buffer[draw_count] = new Vector4(frame_data.frame_uv.x, frame_data.frame_uv.y, frame_data.frame_uv.z, frame_data.frame_uv.w);
 
             draw_count++;
 
             if (draw_count == matrix_buffer.Length)
             {
-                flush_buffer(mesh_quad, sprite_material, sprite_sheet, draw_count);
+                // this might be where the problem lies, since 'Graphics.RenderSpriteInstanced' requires a single sprite
+                // while it could be any sprite at this point, depending on the animation frame.
+                flush_buffer(draw_count, animation.animation_frames[0]);
                 draw_count = 0;
             }
         }
 
         if (draw_count > 0)
-            flush_buffer(mesh_quad, sprite_material, sprite_sheet, draw_count);
+            flush_buffer(draw_count, animations[current_animation_index].animation_frames[0]);
     }
 
-    private void flush_buffer(Mesh mesh, Material material, Texture texture, int count)
+    private void flush_buffer(int count, Sprite sprite)
     {
         material_property_block.SetVectorArray(SHADER_PROP_UV_FRAME, uv_frame_buffer);
-        material_property_block.SetVectorArray(SHADER_PROP_QUAD_DATA, quad_data_buffer);
-        material_property_block.SetTexture(SHADER_PROP_MAIN_TEX, texture);
+        material_property_block.SetVectorArray(SHADER_PROP_UVREMAP_DATA, remapped_uv_buffer);
 
-        var render_params = new RenderParams(material) { matProps = material_property_block };
-        Graphics.RenderMeshInstanced(render_params, mesh, 0, matrix_buffer, count, 0);
+        var render_params = new RenderParams(sprite_material)
+        {
+            matProps = material_property_block
+        };
+
+        var sprite_params = new SpriteParams(sprite);
+        Graphics.RenderSpriteInstanced(render_params, sprite_params, 0, new System.ReadOnlySpan<Matrix4x4>(matrix_buffer, 0, count));
     }
 
     private void set_entity_animation(ref Entity entity, EntityAnimationType animation_type, float start_time = 0.0f)
